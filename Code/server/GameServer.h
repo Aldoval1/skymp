@@ -4,6 +4,7 @@
 #include <Messages/AuthenticationRequest.h>
 #include <Messages/Message.h>
 #include <World.h>
+#include <sqlite3.h>
 
 using TiltedPhoques::ConnectionId_t;
 using TiltedPhoques::Server;
@@ -83,6 +84,8 @@ struct GameServer final : Server
     Uptime GetUptime() const noexcept;
 
     World& GetWorld() const noexcept { return *m_pWorld; }
+    
+    sqlite3* GetDB() const noexcept { return m_db; }
 
     [[nodiscard]] const TiltedPhoques::Set<ConnectionId_t>& GetAdminSessions() const noexcept { return m_adminSessions; }
 
@@ -110,8 +113,11 @@ private:
 private:
     std::chrono::high_resolution_clock::time_point m_startTime;
     std::chrono::high_resolution_clock::time_point m_lastFrameTime;
+    std::chrono::high_resolution_clock::time_point m_lastDbSaveTime;
     std::function<void(UniquePtr<ClientMessage>&, ConnectionId_t)> m_messageHandlers[kClientOpcodeMax];
     std::function<void(UniquePtr<ClientAdminMessage>&, ConnectionId_t)> m_adminMessageHandlers[kClientAdminOpcodeMax];
+
+    sqlite3* m_db = nullptr;
 
     bool m_isPasswordProtected{};
 

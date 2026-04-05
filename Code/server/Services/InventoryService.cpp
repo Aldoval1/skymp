@@ -3,6 +3,8 @@
 #include <Components.h>
 #include <World.h>
 #include <GameServer.h>
+#include <sqlite3.h>
+#include <sstream>
 
 #include <Messages/NotifyObjectInventoryChanges.h>
 #include <Messages/RequestInventoryChanges.h>
@@ -36,7 +38,58 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
     if (it != view.end())
     {
         auto& inventoryComponent = view.get<InventoryComponent>(*it);
+
+        if (m_world.try_get<OwnerComponent>(*it) && acMessage.pPlayer) {
+            if (message.Item.Count < 0) {
+                int32_t currentCount = 0;
+                for (const auto& e : inventoryComponent.Content.Entries) {
+                    if (e.BaseId == message.Item.BaseId) {
+                        currentCount = e.Count;
+                        break;
+                    }
+                }
+                
+                if (currentCount < std::abs(message.Item.Count)) {
+                    spdlog::warn("Inventory authority rejected drop from {}: attempt {:x} count {}", acMessage.pPlayer->GetUsername().c_str(), message.Item.BaseId, std::abs(message.Item.Count));
+                    
+                    NotifyInventoryChanges revert;
+                    revert.ServerId = message.ServerId;
+                    revert.Item = message.Item;
+                    revert.Item.Count = std::abs(message.Item.Count); 
+                    revert.Drop = false;
+                    acMessage.pPlayer->Send(revert);
+                    return; 
+                }
+            }
+        }
+
         inventoryComponent.Content.AddOrRemoveEntry(message.Item);
+
+        // Database persistence logic for objects
+        if (m_world.try_get<FormIdComponent>(*it)) {
+            sqlite3* db = GameServer::Get()->GetDB();
+            if (db) {
+                auto& formIdComponent = m_world.get<FormIdComponent>(*it);
+                
+                std::stringstream invJson;
+                invJson << "[";
+                for (size_t i = 0; i < inventoryComponent.Content.Entries.size(); ++i) {
+                    auto& e = inventoryComponent.Content.Entries[i];
+                    invJson << "{\"BaseId\":" << e.BaseId << ",\"Count\":" << e.Count << ",\"Worn\":" << (e.IsWorn() ? "true" : "false") << "}";
+                    if (i < inventoryComponent.Content.Entries.size() - 1) invJson << ",";
+                }
+                invJson << "]";
+                
+                std::string sql = fmt::format(
+                    "UPDATE Objects SET inventory = '{}' WHERE form_id = {};",
+                    invJson.str(), formIdComponent.Id
+                );
+                
+                char* zErrMsg = 0;
+                sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
+                if (zErrMsg) sqlite3_free(zErrMsg);
+            }
+        }
     }
 
     if (!message.UpdateClients)

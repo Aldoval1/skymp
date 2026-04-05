@@ -1,4 +1,5 @@
 #include <GameServer.h>
+#include <glm/glm.hpp>
 
 #include <Services/OverlayService.h>
 
@@ -40,7 +41,34 @@ void sendPlayerMessage(const ChatMessageType acType, const String acContent, Pla
 
     switch (notifyMessage.MessageType)
     {
-    case kGlobalChat: GameServer::Get()->SendToPlayers(notifyMessage); break;
+    case kGlobalChat: 
+    {
+        if (character) {
+             auto& world = GameServer::Get()->GetWorld();
+             const auto* senderMove = world.try_get<MovementComponent>(*character);
+             const auto& senderCell = aSendingPlayer->GetCellComponent();
+
+             for (Player* p : world.GetPlayerManager()) {
+                 if (p->GetCellComponent().Cell == senderCell.Cell) {
+                     auto pChar = p->GetCharacter();
+                     if (pChar) {
+                         const auto* targetMove = world.try_get<MovementComponent>(*pChar);
+                         if (senderMove && targetMove) {
+                             float dist = glm::distance(senderMove->Position, targetMove->Position);
+                             if (dist <= 3000.f) { 
+                                 p->Send(notifyMessage);
+                             }
+                         } else {
+                             p->Send(notifyMessage);
+                         }
+                     }
+                 }
+             }
+        } else {
+             GameServer::Get()->SendToPlayers(notifyMessage);
+        }
+        break;
+    }
 
     case kSystemMessage: spdlog::error("PlayerId {} attempted to send a System Message.", aSendingPlayer->GetId()); break;
 
@@ -64,6 +92,66 @@ void OverlayService::HandleChatMessage(const PacketEvent<SendChatMessageRequest>
     auto [canceled, reason] = m_world.GetScriptService().HandleChatMessage(*acMessage.pPlayer->GetCharacter(), acMessage.Packet.ChatMessage);
     if (canceled)
         return;
+
+    std::string msgTemp(acMessage.Packet.ChatMessage.c_str());
+
+    if (msgTemp.starts_with("/private ")) {
+        size_t firstSpace = msgTemp.find(' ', 9);
+        if (firstSpace != std::string::npos) {
+            std::string targetName = msgTemp.substr(9, firstSpace - 9);
+            std::string actualMessage = msgTemp.substr(firstSpace + 1);
+            
+            Player* targetPlayer = nullptr;
+            for (Player* p : m_world.GetPlayerManager()) {
+                if (p->GetUsername() == targetName) {
+                    targetPlayer = p;
+                    break;
+                }
+            }
+            if (targetPlayer) {
+                NotifyChatMessageBroadcast notify;
+                notify.MessageType = kSystemMessage; 
+                notify.PlayerName = "[Private] " + std::string(acMessage.pPlayer->GetUsername().c_str());
+                notify.ChatMessage = actualMessage;
+                targetPlayer->Send(notify);
+                
+                notify.PlayerName = "[Private to " + targetName + "]";
+                acMessage.pPlayer->Send(notify);
+            } else {
+                NotifyChatMessageBroadcast notFound;
+                notFound.MessageType = kSystemMessage;
+                notFound.PlayerName = "System";
+                notFound.ChatMessage = "Player not found.";
+                acMessage.pPlayer->Send(notFound);
+            }
+        }
+        return;
+    }
+
+    if (msgTemp.starts_with("/f ")) {
+        std::string actualMessage = msgTemp.substr(3);
+        std::string faction = acMessage.pPlayer->GetFaction().c_str();
+        if (faction.empty()) {
+            NotifyChatMessageBroadcast noFac;
+            noFac.MessageType = kSystemMessage;
+            noFac.PlayerName = "System";
+            noFac.ChatMessage = "You are not in a faction.";
+            acMessage.pPlayer->Send(noFac);
+            return;
+        }
+        
+        NotifyChatMessageBroadcast notify;
+        notify.MessageType = kGlobalChat; 
+        notify.PlayerName = "[Faction] " + std::string(acMessage.pPlayer->GetUsername().c_str());
+        notify.ChatMessage = actualMessage;
+        
+        for (Player* p : m_world.GetPlayerManager()) {
+            if (p->GetFaction() == faction) {
+                p->Send(notify);
+            }
+        }
+        return;
+    }
 
     sendPlayerMessage(acMessage.Packet.MessageType, acMessage.Packet.ChatMessage, acMessage.pPlayer);
 }

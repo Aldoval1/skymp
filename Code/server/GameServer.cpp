@@ -1,4 +1,4 @@
-﻿#include <Components.h>
+#include <Components.h>
 #include <GameServer.h>
 #include <Packet.hpp>
 
@@ -11,6 +11,9 @@
 #include <Events/PlayerLeaveEvent.h>
 #include <Events/UpdateEvent.h>
 #include <steam/isteamnetworkingutils.h>
+#include <sqlite3.h>
+#include <iomanip>
+#include <sstream>
 
 #include <AdminMessages/AdminSessionOpen.h>
 #include <AdminMessages/ClientAdminMessageFactory.h>
@@ -213,6 +216,35 @@ void GameServer::Initialize()
 
     BindServerCommands();
     m_pWorld->GetScriptService().Initialize(*m_pResources);
+
+    int rc = sqlite3_open("server_data.db", &m_db);
+    if (rc) {
+        spdlog::error("Can't open database: {}", sqlite3_errmsg(m_db));
+    } else {
+        const char* sql = "CREATE TABLE IF NOT EXISTS Players ("
+                        "username TEXT PRIMARY KEY, "
+                        "level INTEGER, "
+                        "inventory TEXT, "
+                        "gold INTEGER, "
+                        "x REAL, y REAL, z REAL);"
+                        "CREATE TABLE IF NOT EXISTS Objects ("
+                        "form_id INTEGER PRIMARY KEY, "
+                        "is_locked INTEGER, "
+                        "lock_level INTEGER, "
+                        "open_state INTEGER, "
+                        "inventory TEXT);"
+                        "CREATE TABLE IF NOT EXISTS Factions ("
+                        "username TEXT PRIMARY KEY, "
+                        "faction_name TEXT);";
+        char* zErrMsg = 0;
+        rc = sqlite3_exec(m_db, sql, 0, 0, &zErrMsg);
+        if (rc != SQLITE_OK) {
+            spdlog::error("SQL error: {}", zErrMsg);
+            sqlite3_free(zErrMsg);
+        } else {
+            spdlog::info("Database initialized successfully.");
+        }
+    }
 }
 
 void GameServer::Kill()
@@ -292,6 +324,38 @@ void GameServer::BindMessageHandlers()
 
 void GameServer::BindServerCommands()
 {
+    m_commands.RegisterCommand<String, String>(
+        "fset", "Assign a player to a faction",
+        [this](Console::ArgStack& aArgs)
+        {
+            auto out = spdlog::get("ConOut");
+            String username = aArgs.Pop<String>();
+            String faction = aArgs.Pop<String>();
+
+            if (m_db) {
+                std::string sql = fmt::format(
+                    "INSERT INTO Factions (username, faction_name) VALUES ('{}', '{}') "
+                    "ON CONFLICT(username) DO UPDATE SET faction_name=excluded.faction_name;",
+                    username.c_str(), faction.c_str()
+                );
+                char* zErrMsg = 0;
+                if (sqlite3_exec(m_db, sql.c_str(), 0, 0, &zErrMsg) != SQLITE_OK) {
+                    out->error("DB Error: {}", zErrMsg);
+                    sqlite3_free(zErrMsg);
+                } else {
+                    out->info("Faction for {} set to {}", username.c_str(), faction.c_str());
+                    for (Player* p : m_pWorld->GetPlayerManager()) {
+                        if (p->GetUsername() == username) {
+                            p->SetFaction(faction);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out->error("DB not connected");
+            }
+        });
+
     m_commands.RegisterCommand<>(
         "uptime", "Show how long the server has been running for",
         [this](Console::ArgStack&)
@@ -550,6 +614,51 @@ void GameServer::OnUpdate()
 
     const auto cDeltaSeconds = std::chrono::duration_cast<std::chrono::duration<float>>(cDelta).count();
 
+    // Database 5-minute auto save loop
+    if (std::chrono::duration_cast<std::chrono::seconds>(cNow - m_lastDbSaveTime).count() >= 300) {
+        m_lastDbSaveTime = cNow;
+        if (m_db) {
+            for (Player* pPlayer : m_pWorld->GetPlayerManager()) {
+                auto charEntity = pPlayer->GetCharacter();
+                if (charEntity && m_pWorld->valid(*charEntity)) {
+                    uint16_t level = pPlayer->GetLevel();
+                    float x = 0, y = 0, z = 0;
+                    auto* moveComp = m_pWorld->try_get<MovementComponent>(*charEntity);
+                    if (moveComp) {
+                        x = moveComp->Position.x;
+                        y = moveComp->Position.y;
+                        z = moveComp->Position.z;
+                    }
+                    
+                    std::stringstream invJson;
+                    invJson << "[";
+                    auto* invComp = m_pWorld->try_get<InventoryComponent>(*charEntity);
+                    if (invComp) {
+                        for (size_t i = 0; i < invComp->Content.Entries.size(); ++i) {
+                            auto& e = invComp->Content.Entries[i];
+                            invJson << "{\"BaseId\":" << e.BaseId << ",\"Count\":" << e.Count << ",\"Worn\":" << (e.IsWorn() ? "true" : "false") << "}";
+                            if (i < invComp->Content.Entries.size() - 1) invJson << ",";
+                        }
+                    }
+                    invJson << "]";
+                    
+                    std::string sql = fmt::format(
+                        "INSERT INTO Players (username, level, inventory, gold, x, y, z) VALUES ('{}', {}, '{}', {}, {}, {}, {}) "
+                        "ON CONFLICT(username) DO UPDATE SET level=excluded.level, inventory=excluded.inventory, x=excluded.x, y=excluded.y, z=excluded.z;",
+                        pPlayer->GetUsername().c_str(), level, invJson.str().c_str(), 0, x, y, z
+                    );
+                    
+                    char* zErrMsg = 0;
+                    sqlite3_exec(m_db, sql.c_str(), 0, 0, &zErrMsg);
+                    if (zErrMsg) {
+                        sqlite3_free(zErrMsg);
+                    }
+                }
+            }
+            spdlog::info("Database auto-save complete.");
+        }
+    }
+
     auto& dispatcher = m_pWorld->GetDispatcher();
 
     dispatcher.trigger(UpdateEvent{cDeltaSeconds});
@@ -613,6 +722,43 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
             const auto oldCell = cell.Cell;
             pPlayer->SetCellComponent(CellIdComponent{{}, {}, {}});
             m_pWorld->GetDispatcher().trigger(PlayerLeaveCellEvent(oldCell));
+        }
+
+        // Database player save hook
+        if (m_db) {
+            auto charEntity = pPlayer->GetCharacter();
+            if (charEntity && m_pWorld->valid(*charEntity)) {
+                uint16_t level = pPlayer->GetLevel();
+                float x = 0, y = 0, z = 0;
+                auto* moveComp = m_pWorld->try_get<MovementComponent>(*charEntity);
+                if (moveComp) {
+                    x = moveComp->Position.x;
+                    y = moveComp->Position.y;
+                    z = moveComp->Position.z;
+                }
+                
+                std::stringstream invJson;
+                invJson << "[";
+                auto* invComp = m_pWorld->try_get<InventoryComponent>(*charEntity);
+                if (invComp) {
+                    for (size_t i = 0; i < invComp->Content.Entries.size(); ++i) {
+                        auto& e = invComp->Content.Entries[i];
+                        invJson << "{\"BaseId\":" << e.BaseId << ",\"Count\":" << e.Count << ",\"Worn\":" << (e.IsWorn() ? "true" : "false") << "}";
+                        if (i < invComp->Content.Entries.size() - 1) invJson << ",";
+                    }
+                }
+                invJson << "]";
+                
+                std::string sql = fmt::format(
+                    "INSERT INTO Players (username, level, inventory, gold, x, y, z) VALUES ('{}', {}, '{}', {}, {}, {}, {}) "
+                    "ON CONFLICT(username) DO UPDATE SET level=excluded.level, inventory=excluded.inventory, x=excluded.x, y=excluded.y, z=excluded.z;",
+                    pPlayer->GetUsername().c_str(), level, invJson.str().c_str(), 0, x, y, z
+                );
+                
+                char* zErrMsg = 0;
+                sqlite3_exec(m_db, sql.c_str(), 0, 0, &zErrMsg);
+                if (zErrMsg) sqlite3_free(zErrMsg);
+            }
         }
 
         m_pWorld->GetDispatcher().trigger(PlayerLeaveEvent(pPlayer));
@@ -993,6 +1139,70 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
             spdlog::debug("[GameServer] New notify player {:x} {}", notify.PlayerId, notify.Username.c_str());
 
             Send(pPlayer->GetConnectionId(), notify);
+        }
+
+        // Database load logic
+        if (m_db) {
+            std::string sql = fmt::format(
+                "SELECT level, x, y, z, gold, inventory FROM Players WHERE username = '{}';",
+                pPlayer->GetUsername().c_str()
+            );
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    pPlayer->SetLevel(sqlite3_column_int(stmt, 0));
+                    
+                    auto charEntity = pPlayer->GetCharacter();
+                    if (charEntity && m_pWorld->valid(*charEntity)) {
+                        auto* moveComp = m_pWorld->try_get<MovementComponent>(*charEntity);
+                        if (moveComp) {
+                            moveComp->Position.x = static_cast<float>(sqlite3_column_double(stmt, 1));
+                            moveComp->Position.y = static_cast<float>(sqlite3_column_double(stmt, 2));
+                            moveComp->Position.z = static_cast<float>(sqlite3_column_double(stmt, 3));
+                        }
+                        
+                        // Secure Native String parsing for JSON extraction
+                        const char* invText = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+                        if (invText) {
+                            std::string invStr(invText);
+                            auto* invComp = m_pWorld->try_get<InventoryComponent>(*charEntity);
+                            if (invComp) {
+                                size_t pos = 0;
+                                while ((pos = invStr.find("\"BaseId\":", pos)) != std::string::npos) {
+                                    pos += 9;
+                                    size_t endBase = invStr.find_first_of(",}", pos);
+                                    if (endBase == std::string::npos) break;
+                                    uint32_t baseId = std::stoul(invStr.substr(pos, endBase - pos));
+                                    
+                                    size_t cPos = invStr.find("\"Count\":", pos);
+                                    if (cPos == std::string::npos) break;
+                                    cPos += 8;
+                                    size_t endCount = invStr.find_first_of(",}", cPos);
+                                    if (endCount == std::string::npos) break;
+                                    int32_t count = std::stoi(invStr.substr(cPos, endCount - cPos));
+                                    
+                                    Inventory::Entry e;
+                                    e.BaseId = baseId;
+                                    e.Count = count;
+                                    invComp->Content.Entries.push_back(e);
+                                }
+                            }
+                        }
+                    }
+                    spdlog::info("Restored DB state for player {}", pPlayer->GetUsername().c_str());
+                }
+                sqlite3_finalize(stmt);
+            }
+            std::string fac_sql = fmt::format("SELECT faction_name FROM Factions WHERE username = '{}';", pPlayer->GetUsername().c_str());
+            sqlite3_stmt* fac_stmt;
+            if (sqlite3_prepare_v2(m_db, fac_sql.c_str(), -1, &fac_stmt, 0) == SQLITE_OK) {
+                if (sqlite3_step(fac_stmt) == SQLITE_ROW) {
+                    if (sqlite3_column_text(fac_stmt, 0)) {
+                        pPlayer->SetFaction(reinterpret_cast<const char*>(sqlite3_column_text(fac_stmt, 0)));
+                    }
+                }
+                sqlite3_finalize(fac_stmt);
+            }
         }
 
         m_pWorld->GetDispatcher().trigger(PlayerJoinEvent(pPlayer, acRequest->WorldSpaceId, acRequest->CellId, acRequest->PlayerTime));

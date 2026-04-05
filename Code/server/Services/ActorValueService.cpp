@@ -31,9 +31,32 @@ void ActorValueService::OnActorValueChanges(const PacketEvent<RequestActorValueC
     if (it != actorValuesView.end())
     {
         auto& actorValuesComponent = actorValuesView.get<ActorValuesComponent>(*it);
-        for (auto& [id, value] : message.Values)
-        {
-            actorValuesComponent.CurrentActorValues.ActorValuesList[id] = value;
+        
+        if (acMessage.pPlayer) {
+            bool cheated = false;
+            NotifyActorValueChanges revertMsg;
+            revertMsg.Id = message.Id;
+
+            for (auto& [id, value] : message.Values) {
+                float dbValue = actorValuesComponent.CurrentActorValues.ActorValuesList[id];
+                if (value > dbValue + 100.0f) {
+                    cheated = true;
+                    revertMsg.Values[id] = dbValue;
+                } else {
+                    actorValuesComponent.CurrentActorValues.ActorValuesList[id] = value;
+                }
+            }
+
+            if (cheated) {
+                spdlog::warn("ActorValue auth rejected manipulation from {}", acMessage.pPlayer->GetUsername().c_str());
+                acMessage.pPlayer->Send(revertMsg);
+                return;
+            }
+        } else {
+            for (auto& [id, value] : message.Values)
+            {
+                actorValuesComponent.CurrentActorValues.ActorValuesList[id] = value;
+            }
         }
     }
 
@@ -57,9 +80,32 @@ void ActorValueService::OnActorMaxValueChanges(const PacketEvent<RequestActorMax
     if (it != actorValuesView.end())
     {
         auto& actorValuesComponent = actorValuesView.get<ActorValuesComponent>(*it);
-        for (auto& [id, value] : message.Values)
-        {
-            actorValuesComponent.CurrentActorValues.ActorMaxValuesList[id] = value;
+        
+        if (acMessage.pPlayer) {
+            bool cheated = false;
+            NotifyActorMaxValueChanges revertMsg;
+            revertMsg.Id = message.Id;
+
+            for (auto& [id, value] : message.Values) {
+                float dbValue = actorValuesComponent.CurrentActorValues.ActorMaxValuesList[id];
+                if (value > dbValue + 100.0f) {
+                    cheated = true;
+                    revertMsg.Values[id] = dbValue;
+                } else {
+                    actorValuesComponent.CurrentActorValues.ActorMaxValuesList[id] = value;
+                }
+            }
+
+            if (cheated) {
+                spdlog::warn("ActorMaxValue auth rejected manipulation from {}", acMessage.pPlayer->GetUsername().c_str());
+                acMessage.pPlayer->Send(revertMsg);
+                return;
+            }
+        } else {
+            for (auto& [id, value] : message.Values)
+            {
+                actorValuesComponent.CurrentActorValues.ActorMaxValuesList[id] = value;
+            }
         }
     }
 

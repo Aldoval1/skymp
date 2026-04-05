@@ -16,4 +16,5 @@ struct ObjectComponent
 
     Player* pLastSender;
     LockData CurrentLockData{};
+    uint8_t CurrentOpenState{0};
 };

@@ -70,7 +70,7 @@ void SetMaxstdio()
 
 int StartUp(int argc, char** argv)
 {
-    bool askSelect = (GetAsyncKeyState(VK_SPACE) & 0x8000);
+    bool askSelect = false;
     if (!HandleArguments(argc, argv, askSelect))
         return -1;
 
@@ -102,12 +102,13 @@ int StartUp(int argc, char** argv)
             DIE_NOW(ec);
     }
 
-    if (!oobe::SelectInstall(askSelect))
-        DIE_NOW(L"Failed to select game install.");
+    // Bypass oobe::SelectInstall entirely, set gamePath to current directory
+    LC->gamePath = std::filesystem::current_path();
+    LC->exePath = LC->gamePath / L"SkyrimSE.exe";
 
     // Bind path environment.
     loader::InstallPathRouting(LC->gamePath);
-    steam::Load(LC->gamePath);
+    // Remove steam::Load(LC->gamePath) completely as requested to bypass Bethesda launcher entirely
 
     if (!LoadProgram(*LC))
         return 3;
@@ -149,28 +150,7 @@ void InitClient()
 
 bool HandleArguments(int aArgc, char** aArgv, bool& aAskSelect)
 {
-    for (int i = 1; i < aArgc; i++)
-    {
-        if (std::strcmp(aArgv[i], "-r") == 0)
-            aAskSelect = true;
-        else if (std::strcmp(aArgv[i], "--exePath") == 0)
-        {
-            if (i + 1 >= aArgc)
-            {
-                SetLastError(ERROR_BAD_PATHNAME);
-                Die(L"No exe path specified", true);
-                return false;
-            }
-
-            if (!oobe::PathArgument(aArgv[i + 1]))
-            {
-                SetLastError(ERROR_BAD_ARGUMENTS);
-                Die(L"Failed to parse path argument", true);
-                return false;
-            }
-        }
-    }
-
+    // Return true and ignore all path arguments to ensure it runs completely independent
     return true;
 }
 } // namespace launcher

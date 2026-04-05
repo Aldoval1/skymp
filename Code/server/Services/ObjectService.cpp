@@ -3,6 +3,9 @@
 #include <GameServer.h>
 #include <World.h>
 #include <Components.h>
+#include <sqlite3.h>
+#include <sstream>
+#include <iostream>
 
 #include <Events/PlayerLeaveCellEvent.h>
 
@@ -90,6 +93,15 @@ void ObjectService::OnAssignObjectsRequest(const PacketEvent<AssignObjectsReques
             objectData.IsSenderFirst = false;
 
             response.Objects.push_back(objectData);
+            
+            // Ensure door state is synced if it is open
+            if (objectComponent.CurrentOpenState) {
+                 NotifyActivate notify;
+                 notify.Id = object.Id;
+                 notify.ActivatorId = 0;
+                 notify.PreActivationOpenState = 0;
+                 acMessage.pPlayer->Send(notify);
+            }
         }
         else
         {
@@ -109,6 +121,43 @@ void ObjectService::OnAssignObjectsRequest(const PacketEvent<AssignObjectsReques
             objectData.ServerId = World::ToInteger(cEntity);
             objectData.IsSenderFirst = true;
 
+            // Database persistence logic
+            sqlite3* db = GameServer::Get()->GetDB();
+            if (db) {
+                std::string sql = fmt::format("SELECT is_locked, lock_level, open_state FROM Objects WHERE form_id = {};", object.Id);
+                sqlite3_stmt* stmt;
+                if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+                    if (sqlite3_step(stmt) == SQLITE_ROW) {
+                        objectComponent.CurrentLockData.IsLocked = sqlite3_column_int(stmt, 0);
+                        objectComponent.CurrentLockData.LockLevel = sqlite3_column_int(stmt, 1);
+                        objectComponent.CurrentOpenState = sqlite3_column_int(stmt, 2);
+                        
+                        // Assume authoritative state
+                        objectData.IsSenderFirst = false; 
+                        objectData.CurrentLockData.IsLocked = objectComponent.CurrentLockData.IsLocked;
+                        objectData.CurrentLockData.LockLevel = objectComponent.CurrentLockData.LockLevel;
+                        
+                        if (objectComponent.CurrentOpenState) {
+                             NotifyActivate notify;
+                             notify.Id = object.Id;
+                             notify.ActivatorId = 0;
+                             notify.PreActivationOpenState = 0;
+                             acMessage.pPlayer->Send(notify);
+                        }
+                    } else {
+                        // Does not exist, create the entry with client's reported state
+                        std::string ins_sql = fmt::format(
+                            "INSERT INTO Objects (form_id, is_locked, lock_level, open_state, inventory) VALUES ({}, {}, {}, 0, '[]');",
+                            object.Id, object.CurrentLockData.IsLocked, object.CurrentLockData.LockLevel
+                        );
+                        char* zErrMsg = 0;
+                        sqlite3_exec(db, ins_sql.c_str(), 0, 0, &zErrMsg);
+                        if (zErrMsg) sqlite3_free(zErrMsg);
+                    }
+                    sqlite3_finalize(stmt);
+                }
+            }
+
             response.Objects.push_back(objectData);
         }
     }
@@ -123,6 +172,33 @@ void ObjectService::OnActivate(const PacketEvent<ActivateRequest>& acMessage) co
     notifyActivate.Id = acMessage.Packet.Id;
     notifyActivate.ActivatorId = acMessage.Packet.ActivatorId;
     notifyActivate.PreActivationOpenState = acMessage.Packet.PreActivationOpenState;
+
+    auto objectView = m_world.view<FormIdComponent, ObjectComponent>();
+    const auto iter = std::find_if(
+        std::begin(objectView), std::end(objectView),
+        [objectView, id = acMessage.Packet.Id](auto entity)
+        {
+            const auto& formIdComponent = objectView.get<FormIdComponent>(entity);
+            return formIdComponent.Id == id;
+        });
+
+    if (iter != std::end(objectView))
+    {
+        auto& objectComponent = objectView.get<ObjectComponent>(*iter);
+        objectComponent.CurrentOpenState = !acMessage.Packet.PreActivationOpenState;
+
+        sqlite3* db = GameServer::Get()->GetDB();
+        if (db) {
+            std::string sql = fmt::format(
+                "INSERT INTO Objects (form_id, is_locked, lock_level, open_state, inventory) VALUES ({}, 0, 0, {}, '[]') "
+                "ON CONFLICT(form_id) DO UPDATE SET open_state=excluded.open_state;",
+                acMessage.Packet.Id, objectComponent.CurrentOpenState
+            );
+            char* zErrMsg = 0;
+            sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
+            if (zErrMsg) sqlite3_free(zErrMsg);
+        }
+    }
 
     for (auto pPlayer : m_world.GetPlayerManager())
     {
@@ -155,6 +231,18 @@ void ObjectService::OnLockChange(const PacketEvent<LockChangeRequest>& acMessage
         auto& objectComponent = objectView.get<ObjectComponent>(*iter);
         objectComponent.CurrentLockData.IsLocked = acMessage.Packet.IsLocked;
         objectComponent.CurrentLockData.LockLevel = acMessage.Packet.LockLevel;
+
+        sqlite3* db = GameServer::Get()->GetDB();
+        if (db) {
+            std::string sql = fmt::format(
+                "INSERT INTO Objects (form_id, is_locked, lock_level, open_state, inventory) VALUES ({}, {}, {}, 0, '[]') "
+                "ON CONFLICT(form_id) DO UPDATE SET is_locked=excluded.is_locked, lock_level=excluded.lock_level;",
+                acMessage.Packet.Id, acMessage.Packet.IsLocked, acMessage.Packet.LockLevel
+            );
+            char* zErrMsg = 0;
+            sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
+            if (zErrMsg) sqlite3_free(zErrMsg);
+        }
     }
 
     for (Player* pPlayer : m_world.GetPlayerManager())

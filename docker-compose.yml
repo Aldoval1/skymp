@@ -1,17 +1,39 @@
-version: "3"
+version: '3.8'
 
 services:
-  skyrim-together:
-    image: tiltedphoques/st-reborn-server:latest
-    container_name: skyrim-together
-    volumes:
-      - /home/user/skyrim-together/config:/st-server/config
-      - /home/user/skyrim-together/logs:/st-server/logs
-      - /home/user/skyrim-together/Data:/st-server/Data
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-    ports:
-      - 10578:10578/udp
+  database:
+    image: postgres:16
+    container_name: st_roleplay_db
     restart: unless-stopped
-    stdin_open: true
-    tty: true
+    environment:
+      POSTGRES_USER: skyrim
+      POSTGRES_PASSWORD: roleplay_password
+      POSTGRES_DB: skyrim_together
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  skyrim_server:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: st_roleplay_server
+    restart: unless-stopped
+    depends_on:
+      - database
+    ports:
+      - "10578:10578/udp"
+      - "10578:10578/tcp"
+    volumes:
+      # Maps local SQLite data and logs to persist data beyond container lifecycle
+      - ./server_data:/app/server_data
+      - ./logs:/app/logs
+    environment:
+      - DB_HOST=database
+      - DB_USER=skyrim
+      - DB_PASS=roleplay_password
+      - DB_NAME=skyrim_together
+
+volumes:
+  pgdata:

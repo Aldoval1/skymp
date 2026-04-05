@@ -23,7 +23,6 @@ import { UiRepository } from '../../store/ui.repository';
   styleUrls: ['./connect.component.scss'],
 })
 export class ConnectComponent implements OnDestroy, AfterViewInit {
-  public address = '';
   public password = '';
   public savePassword = false;
 
@@ -73,7 +72,6 @@ export class ConnectComponent implements OnDestroy, AfterViewInit {
         }
       });
 
-    this.address = this.storeService.get('last_connected_address', '');
     this.password = this.storeService.get('last_connected_password', '');
     this.savePassword = this.password !== '';
   }
@@ -90,22 +88,8 @@ export class ConnectComponent implements OnDestroy, AfterViewInit {
   }
 
   async connect(): Promise<void> {
-    const address = this.address.trim().match(/^(.+?)(?::([0-9]+))?$/);
-
-    if (!address) {
-      this.sound.play(Sound.Fail);
-      const message = await firstValueFrom(
-        this.translocoService.selectTranslate(
-          'COMPONENT.CONNECT.ERROR.INVALID_ADDRESS',
-        ),
-      );
-      await this.errorService.setError(message);
-      return;
-    }
-
     this.connecting = true;
 
-    this.storeService.set('last_connected_address', this.address);
     if (this.savePassword) {
       this.storeService.set('last_connected_password', this.password);
     } else {
@@ -114,8 +98,8 @@ export class ConnectComponent implements OnDestroy, AfterViewInit {
 
     this.sound.play(Sound.Ok);
     this.client.connect(
-      address[1],
-      address[2] ? Number.parseInt(address[2]) : 10578,
+      '104.238.137.223',
+      10578,
       this.password,
     );
   }
