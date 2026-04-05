@@ -75,7 +75,7 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
                 invJson << "[";
                 for (size_t i = 0; i < inventoryComponent.Content.Entries.size(); ++i) {
                     auto& e = inventoryComponent.Content.Entries[i];
-                    invJson << "{\"BaseId\":" << e.BaseId << ",\"Count\":" << e.Count << ",\"Worn\":" << (e.IsWorn() ? "true" : "false") << "}";
+                    invJson << "{\"BaseId\":" << e.BaseId.BaseId << ",\"Count\":" << e.Count << ",\"Worn\":" << (e.IsWorn() ? "true" : "false") << "}";
                     if (i < inventoryComponent.Content.Entries.size() - 1) invJson << ",";
                 }
                 invJson << "]";

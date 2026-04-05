@@ -1182,7 +1182,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
                                     int32_t count = std::stoi(invStr.substr(cPos, endCount - cPos));
                                     
                                     Inventory::Entry e;
-                                    e.BaseId = baseId;
+                                    e.BaseId = GameId(0, baseId);
                                     e.Count = count;
                                     invComp->Content.Entries.push_back(e);
                                 }
